@@ -77,8 +77,14 @@ jobs:
       - name: Installer registers the host and answers ping
         run: |
           set -euo pipefail
+          # The installer honours XDG_CONFIG_HOME / XDG_DATA_HOME, and the
+          # GitHub runner sets XDG_CONFIG_HOME, so overriding HOME alone would
+          # register into the runner's real ~/.config and find nothing here.
           export HOME="$(mktemp -d)"
-          mkdir -p "$HOME/.config/net.imput.helium"
+          export XDG_CONFIG_HOME="$HOME/.config"
+          export XDG_DATA_HOME="$HOME/.local/share"
+          export XDG_STATE_HOME="$HOME/.local/state"
+          mkdir -p "$XDG_CONFIG_HOME/net.imput.helium"
           out="$(./native/install_native_host.sh)"
           echo "$out"
           echo "$out" | grep -q '^host ok' || { echo '::error::installed host did not answer ping'; exit 1; }
@@ -98,7 +104,9 @@ jobs:
         run: |
           set -euo pipefail
           export HOME="$(mktemp -d)"
-          mkdir -p "$HOME/.config/net.imput.helium"
+          export XDG_CONFIG_HOME="$HOME/.config"
+          export XDG_DATA_HOME="$HOME/.local/share"
+          mkdir -p "$XDG_CONFIG_HOME/net.imput.helium"
           ./native/install_native_host.sh >/dev/null
           ./native/install_native_host.sh --uninstall | grep -q '^uninstalled'
           test ! -e "$HOME/.config/net.imput.helium/NativeMessagingHosts/com.hyperramzey.mpv_ai.json"
