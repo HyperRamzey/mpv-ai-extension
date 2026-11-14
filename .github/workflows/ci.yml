@@ -1,0 +1,106 @@
+# ============================================================================
+# ci.yml — gates for the browser extension and the native messaging host.
+#
+# These are the checks that used to live in mpv-nvidia-ai-chain's ci.yml, plus
+# one that did not: an actual installer run into a throwaway $HOME, which is
+# the only way to catch a broken host before it fails silently in a browser.
+# ============================================================================
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Host compiles
+        run: python3 -m py_compile native/*.py
+
+      - name: Shell scripts parse
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq shellcheck
+          shellcheck -x native/*.sh
+
+      - name: Manifests are valid JSON
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import glob, json, sys
+          files = glob.glob('extension/**/*.json', recursive=True)
+          if not files:
+              sys.exit('no manifest found')
+          for f in sorted(files):
+              json.load(open(f, encoding='utf-8'))
+              print('ok', f)
+          PY
+
+      - name: Extension id matches the one the README documents
+        run: |
+          set -euo pipefail
+          id="$(python3 native/extension_id.py)"
+          echo "derived: $id"
+          [[ "$id" =~ ^[a-p]{32}$ ]] || { echo "::error::not a Chrome id"; exit 1; }
+          grep -q "$id" README.md \
+            || { echo "::error::README does not document the current id; rotating the manifest key breaks every existing install"; exit 1; }
+
+      - name: Manifest references only files that exist
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, sys
+          m = json.load(open('extension/manifest.json', encoding='utf-8'))
+          refs = [m['background']['service_worker'], m['options_ui']['page']]
+          refs += list(m['action']['default_icon'].values())
+          refs += list(m['icons'].values())
+          missing = [r for r in refs if not os.path.isfile(os.path.join('extension', r))]
+          if missing:
+              sys.exit('manifest references missing files: ' + ', '.join(missing))
+          print('ok', len(refs), 'referenced files present')
+          PY
+
+      # The installer is the whole product surface: it derives the id, copies
+      # the host, writes the browser manifest and then pings the installed
+      # copy. mpv is absent here on purpose — the host must answer the ping and
+      # report the missing tools instead of failing.
+      - name: Installer registers the host and answers ping
+        run: |
+          set -euo pipefail
+          export HOME="$(mktemp -d)"
+          mkdir -p "$HOME/.config/net.imput.helium"
+          out="$(./native/install_native_host.sh)"
+          echo "$out"
+          echo "$out" | grep -q '^host ok' || { echo '::error::installed host did not answer ping'; exit 1; }
+          test -f "$HOME/.config/net.imput.helium/NativeMessagingHosts/com.hyperramzey.mpv_ai.json"
+          python3 - "$HOME/.config/net.imput.helium/NativeMessagingHosts/com.hyperramzey.mpv_ai.json" <<'PY'
+          import json, sys
+          m = json.load(open(sys.argv[1], encoding='utf-8'))
+          assert m['name'] == 'com.hyperramzey.mpv_ai', m['name']
+          assert m['type'] == 'stdio', m['type']
+          assert m['path'].endswith('/mpv_ai_host.py'), m['path']
+          assert len(m['allowed_origins']) == 1
+          assert m['allowed_origins'][0].startswith('chrome-extension://')
+          print('ok host manifest:', m['allowed_origins'][0])
+          PY
+
+      - name: Uninstall removes what install created
+        run: |
+          set -euo pipefail
+          export HOME="$(mktemp -d)"
+          mkdir -p "$HOME/.config/net.imput.helium"
+          ./native/install_native_host.sh >/dev/null
+          ./native/install_native_host.sh --uninstall | grep -q '^uninstalled'
+          test ! -e "$HOME/.config/net.imput.helium/NativeMessagingHosts/com.hyperramzey.mpv_ai.json"
+          test ! -e "$HOME/.local/share/mpv-ai-extension"
+          echo "ok clean uninstall"
